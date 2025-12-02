@@ -1,3 +1,4 @@
+import { useWaterNotifications } from '../hooks/useWaterNotifications'; // Adjust path if needed
 import React, { useState, useEffect } from "react";
 import {
   Dimensions,
@@ -374,6 +375,7 @@ const HomeScreen = () => {
     waterLevel: 0,
     flowRate: 0,
   });
+  
   useEffect(() => {
     const userId = auth.currentUser?.uid;
     console.log("🚀 Fetching data for User ID:", userId);
@@ -424,8 +426,10 @@ const HomeScreen = () => {
     };
   }, []);
 
-  // Determine safety status based on pH (Standard range 6.5 - 8.5)
-  const isSafe = sensorData.ph >= 6.5 && sensorData.ph <= 8.5;
+// 3. THE SMART LOGIC (OUTSIDE useEffect)
+  // 🟢 CORRECT: Calling the hook at the top level.
+  // It runs automatically every time setSensorData updates the state.
+  const { isSafe } = useWaterNotifications(sensorData);
 
   const currentStatus = {
     title: isSafe ? "Water Is Safe" : "Water Is Not Safe",
@@ -439,7 +443,7 @@ const HomeScreen = () => {
     ),
     values: {
       ph: sensorData.ph.toFixed(1),
-      tds: "145ppm", // Static for now
+      // tds: "145ppm", // Static for now
       turbidity: `${sensorData.turbidity.toFixed(1)}NTU`,
     },
     valueBg: isSafe ? "#7ACE7D" : "#FFCDD2",
@@ -600,7 +604,9 @@ const HomeScreen = () => {
                   <Text style={styles.label}>ph Level</Text>
                 </View>
               </View>
-              <View style={styles.valueBoxWrapper}>
+
+              {/* Note: Removed TDS */}
+              {/* <View style={styles.valueBoxWrapper}>
                 <View
                   style={[
                     styles.valueBox,
@@ -614,7 +620,8 @@ const HomeScreen = () => {
                 <View style={styles.valueLabelBox}>
                   <Text style={styles.label}>TDS</Text>
                 </View>
-              </View>
+              </View> */}
+
               <View style={styles.valueBoxWrapper}>
                 <View
                   style={[
@@ -641,6 +648,7 @@ const HomeScreen = () => {
                   { width: "58%", backgroundColor: currentStatus.bgColor },
                 ]}
               >
+                {/* Note: Must be "Daily Water Usage" */}
                 <Ionicons name="water-outline" size={24} color="#fff" />
                 <Text style={styles.detailValue}>
                   {sensorData.flowRate} L/min
@@ -658,7 +666,7 @@ const HomeScreen = () => {
                   size={24}
                   color="#fff"
                 />
-                <Text style={styles.detailValue}>Ano?</Text>
+                <Text style={styles.detailValue}>300</Text>
                 <Text style={styles.detailLabel}>Total Saved</Text>
               </View>
             </View>
@@ -673,7 +681,10 @@ const HomeScreen = () => {
                 <Text style={styles.detailValue}>98%</Text>
                 <Text style={styles.detailLabel}>Filter Health</Text>
               </View>
-              <View
+
+              {/* Note: You can ignore this  */}
+              {/* Uncessasry na guro cuz of physical battery incator */}
+              {/* <View
                 style={[
                   styles.detailCard,
                   { width: "63%", backgroundColor: currentStatus.bgColor },
@@ -682,7 +693,8 @@ const HomeScreen = () => {
                 <Ionicons name="battery-full-outline" size={24} color="#fff" />
                 <Text style={styles.detailValue}>100%</Text>
                 <Text style={styles.detailLabel}>Battery Percentage</Text>
-              </View>
+              </View> */}
+
             </View>
           </View>
 
