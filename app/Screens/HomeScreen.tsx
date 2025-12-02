@@ -658,7 +658,7 @@ const HomeScreen = () => {
                   size={24}
                   color="#fff"
                 />
-                <Text style={styles.detailValue}>3000</Text>
+                <Text style={styles.detailValue}>Ano?</Text>
                 <Text style={styles.detailLabel}>Total Saved</Text>
               </View>
             </View>
