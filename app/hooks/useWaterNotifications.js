@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import * as Notifications from 'expo-notifications';
 import { collection, addDoc, serverTimestamp } from 'firebase/firestore'; 
-import { auth, db } from '../firebaseConfig'; // Ensure you import 'db' (Firestore) here
+import { auth, db } from '../../firebaseConfig';// Ensure you import 'db' (Firestore) here
 
 // 1. Configure Notification Appearance
 Notifications.setNotificationHandler({
