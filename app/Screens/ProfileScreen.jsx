@@ -15,6 +15,8 @@ import {
     TextInput,
     TouchableOpacity,
     View,
+    Platform, // Added for safe usage
+    StatusBar // Added for safe usage
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { auth, db, storage } from '../../firebaseConfig';
@@ -22,7 +24,8 @@ import { auth, db, storage } from '../../firebaseConfig';
 const ProfileScreen = () => {
     const router = useRouter();
     
-    const [profileImage, setProfileImage] = useState<string | null>(null);
+    // ✅ FIXED: Removed the TypeScript <string | null> syntax
+    const [profileImage, setProfileImage] = useState(null);
     const [name, setName] = useState('');
     const [email, setEmail] = useState('');
     const [phone, setPhone] = useState('');
@@ -137,6 +140,8 @@ const ProfileScreen = () => {
     
     const handleLogout = () => {
         auth.signOut().catch(error => console.error("Logout Error:", error));
+        // Optional: Redirect to login if your auth listener doesn't handle it automatically
+        // router.replace('/Screens/LoginScreen'); 
     };
 
     if (loading && user) {
@@ -357,4 +362,3 @@ const styles = StyleSheet.create({
 });
 
 export default ProfileScreen;
-

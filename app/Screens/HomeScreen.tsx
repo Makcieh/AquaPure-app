@@ -1,5 +1,8 @@
 import { useWaterNotifications } from '../hooks/useWaterNotifications'; // Adjust path if needed
+import { fetchWeeklyData, fetchAnalyticsSummary } from '../services/waterUsageService'; // Import the new file
 import React, { useState, useEffect } from "react";
+import { logDailyUsage } from '../services/waterUsageService';
+import { subscribeToWeeklyData, subscribeToAnalyticsSummary } from '../services/waterUsageService';
 import {
   Dimensions,
   Image,
@@ -9,6 +12,8 @@ import {
   Text,
   TouchableOpacity,
   View,
+  Platform,    // <--- Add this
+  StatusBar,
 } from "react-native";
 import { Feather, Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
@@ -18,10 +23,11 @@ import Svg, { Path } from "react-native-svg";
 import { auth, realtimeDb } from "../../firebaseConfig";
 import { ref, onValue, off } from "firebase/database";
 
-// Helper function to handle logout
-const handleLogout = () => {
-  auth.signOut().catch((error) => console.error("Logout Error:", error));
-};
+// // Helper function to handle logout
+// const handleLogout = () => {
+//   auth.signOut().catch((error) => console.error("Logout Error:", error));
+// };
+
 
 // --- TypeScript Interfaces ---
 interface GraphDataPoint {
@@ -367,6 +373,55 @@ const HomeScreen = () => {
   const [showDropdown, setShowDropdown] = useState(false);
   const [activeTab, setActiveTab] = useState("Dashboard");
 
+  const [weeklyData, setWeeklyData] = useState([]); 
+  
+  interface AnalyticsData {
+  totalLiters: string;
+  moneySaved: string;
+}
+
+useEffect(() => {
+    const userId = auth.currentUser?.uid;
+    
+    if (userId) {
+      console.log("🟢 Starting Real-Time Analytics Stream...");
+
+      // A. Subscribe to Weekly Graph Updates
+      const unsubWeekly = subscribeToWeeklyData(userId, (newData) => {
+        setWeeklyData(newData);
+      });
+
+      // B. Subscribe to Total Stats Updates
+      const unsubSummary = subscribeToAnalyticsSummary(userId, (newStats) => {
+        setAnalytics(newStats);
+      });
+
+      // CLEANUP: Stop listening when we leave the screen (prevents memory leaks)
+      return () => {
+        console.log("🔴 Closing Analytics Stream...");
+        unsubWeekly();
+        unsubSummary();
+      };
+    }
+  }, []);
+
+// 👇 Initialize with STRINGS ('0'), not numbers (0)
+const [analytics, setAnalytics] = useState<AnalyticsData>({ 
+  totalLiters: '0', 
+  moneySaved: '0' 
+});
+
+  const handleLogout = async () => {
+    try {
+      await auth.signOut();
+      console.log("User signed out!");
+      // Force navigation back to Login
+      router.replace("/Screens/LoginScreen"); 
+    } catch (error) {
+      console.error("Logout Error:", error);
+    }
+  };
+
   // Real-time sensor state
   const [sensorData, setSensorData] = useState({
     ph: 0,
@@ -374,6 +429,7 @@ const HomeScreen = () => {
     temperature: 0,
     waterLevel: 0,
     flowRate: 0,
+    dailyUsage: 0,
   });
   
   useEffect(() => {
@@ -407,6 +463,7 @@ const HomeScreen = () => {
             temperature: Number(data.temperature) || 0,
             waterLevel: Number(data.waterLevel) || 0,
             flowRate: Number(data.flowRate) || 0,
+            dailyUsage: Number(data.dailyUsage) || 0,
           });
         } else {
           console.log("⚠️ No data found at this path.");
@@ -425,6 +482,26 @@ const HomeScreen = () => {
       unsubscribe();
     };
   }, []);
+
+  useEffect(() => {
+    const loadAnalytics = async () => {
+      const userId = auth.currentUser?.uid;
+      
+      if (userId) {
+        console.log("📊 Fetching Graph Data...");
+        
+        // A. Get Graph Data
+        const graphData = await fetchWeeklyData(userId);
+        setWeeklyData(graphData);
+
+        // B. Get Totals
+        const summary = await fetchAnalyticsSummary(userId);
+        setAnalytics(summary);
+      }
+    };
+
+    loadAnalytics(); // Call the function
+  }, []); // [] means run once when app opens
 
 // 3. THE SMART LOGIC (OUTSIDE useEffect)
   // 🟢 CORRECT: Calling the hook at the top level.
@@ -467,12 +544,28 @@ const HomeScreen = () => {
   const safeWaterLevel = Math.min(Math.max(sensorData.waterLevel, 0), 100);
   const waveHeight = 230 - (safeWaterLevel / 100) * 230;
 
+  // A. Calculate Filter Health (Assuming Filter lasts for 2000 Liters)
+  const MAX_FILTER_LIFE = 2000;
+  const totalUsed = parseFloat(analytics.totalLiters || '0'); // Convert string '15.5' to number 15.5
+  const healthPercentage = Math.max(0, 100 - ((totalUsed / MAX_FILTER_LIFE) * 100)).toFixed(0);
+
+  // B. Get "Today's Usage" from the Weekly Graph Data
+  // We look for a bar in the graph that matches today's date (e.g., "12-02")
+  const todayLabel = new Date().toISOString().split('T')[0].slice(5); 
+  const todayData = weeklyData.find(item => item.label === todayLabel);
+  const todayLiters = todayData ? todayData.value : 0;
+
   return (
     <SafeAreaView style={styles.page}>
+      <StatusBar
+        barStyle="dark-content" // Makes the Time/Battery icons BLACK
+        backgroundColor="transparent" // Lets the white page background show through
+        translucent={true} // Tells Android to let the app draw behind the bar
+      />
       <View style={styles.headerContainer}>
         <TouchableOpacity
           style={styles.profileSection}
-          onPress={() => router.push("/Screens/ProfileScreen")}
+          onPress={() => router.push("./ProfileScreen")}
         >
           <Image
             source={{ uri: userProfileImage }}
@@ -642,19 +735,28 @@ const HomeScreen = () => {
 
           <View style={styles.detailsGrid}>
             <View style={styles.gridRow}>
-              <View
+              <View style={[styles.detailCard, { width: "58%", backgroundColor: currentStatus.bgColor }]}>
+                <Ionicons name="water-outline" size={24} color="#fff" />
+                  <Text style={styles.detailValue}>
+                    {todayLiters.toFixed(1)} L
+                    </Text>
+                    <Text style={styles.detailLabel}>Daily Water Usage</Text>
+                  </View>
+
+              {/* <View
                 style={[
                   styles.detailCard,
                   { width: "58%", backgroundColor: currentStatus.bgColor },
                 ]}
-              >
+                > */}
                 {/* Note: Must be "Daily Water Usage" */}
-                <Ionicons name="water-outline" size={24} color="#fff" />
+                {/* <Ionicons name="water-outline" size={24} color="#fff" />
                 <Text style={styles.detailValue}>
                   {sensorData.flowRate} L/min
                 </Text>
                 <Text style={styles.detailLabel}>Water Flow Rate</Text>
-              </View>
+                </View> */}
+                
               <View
                 style={[
                   styles.detailCard,
@@ -666,8 +768,10 @@ const HomeScreen = () => {
                   size={24}
                   color="#fff"
                 />
-                <Text style={styles.detailValue}>300</Text>
-                <Text style={styles.detailLabel}>Total Saved</Text>
+                <Text style={styles.detailValue}>
+  ₱{analytics.moneySaved}
+</Text>
+<Text style={styles.detailLabel}>Total Saved</Text>
               </View>
             </View>
             <View style={styles.gridRow}>
@@ -678,7 +782,9 @@ const HomeScreen = () => {
                 ]}
               >
                 <Ionicons name="heart-outline" size={24} color="#fff" />
-                <Text style={styles.detailValue}>98%</Text>
+                <Text style={styles.detailValue}>
+                            {healthPercentage}%
+                  </Text>
                 <Text style={styles.detailLabel}>Filter Health</Text>
               </View>
 
@@ -694,7 +800,6 @@ const HomeScreen = () => {
                 <Text style={styles.detailValue}>100%</Text>
                 <Text style={styles.detailLabel}>Battery Percentage</Text>
               </View> */}
-
             </View>
           </View>
 
@@ -719,6 +824,30 @@ const HomeScreen = () => {
       )}
 
       {activeTab === "Analytics" && <AnalyticsTabContent />}
+
+      {/* 🛑 TEMP DEBUG BUTTON - DELETE BEFORE FINAL DEMO */}
+<TouchableOpacity
+  style={{
+    backgroundColor: 'orange',
+    padding: 15,
+    margin: 20,
+    borderRadius: 10,
+    alignItems: 'center'
+  }}
+  onPress={async () => {
+    const uid = auth.currentUser?.uid;
+    if (uid) {
+      // Simulate adding 15.5 Liters right now
+      await logDailyUsage(uid, 15.5);
+      alert('Simulated 15.5L Usage!');
+      // Note: You might need to reload the app to see the graph update
+      // unless you add a refresh trigger.
+    }
+  }}
+>
+  <Text style={{ fontWeight: 'bold' }}>🧪 SIMULATE FLOW (15L)</Text>
+</TouchableOpacity>
+
     </SafeAreaView>
   );
 };
@@ -729,6 +858,8 @@ const styles = StyleSheet.create({
   page: {
     flex: 1,
     backgroundColor: "#fff",
+    // If Android, push down by the status bar height. If iOS, do nothing (0).
+    paddingTop: Platform.OS === "android" ? StatusBar.currentHeight : 0,
   },
   headerContainer: {
     flexDirection: "row",
