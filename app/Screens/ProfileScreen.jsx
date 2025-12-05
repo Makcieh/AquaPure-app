@@ -15,16 +15,16 @@ import {
     TextInput,
     TouchableOpacity,
     View,
-    Platform, // Added for safe usage
-    StatusBar // Added for safe usage
+    Platform, 
+    StatusBar 
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+// Ensure these are correctly exported from your config file
 import { auth, db, storage } from '../../firebaseConfig';
 
 const ProfileScreen = () => {
     const router = useRouter();
     
-    // ✅ FIXED: Removed the TypeScript <string | null> syntax
     const [profileImage, setProfileImage] = useState(null);
     const [name, setName] = useState('');
     const [email, setEmail] = useState('');
@@ -35,6 +35,7 @@ const ProfileScreen = () => {
     const [user, setUser] = useState(auth.currentUser);
     const [hasNotificationHistory, setHasNotificationHistory] = useState(false);
 
+    // 1. Listen for Auth State Changes (in case of logout/login)
     useEffect(() => {
         const unsubscribeAuth = onAuthStateChanged(auth, (currentUser) => {
             setUser(currentUser);
@@ -42,24 +43,31 @@ const ProfileScreen = () => {
         return () => unsubscribeAuth();
     }, []);
 
+    // 2. Fetch User Data from Firestore
     useEffect(() => {
         if (user) {
             setLoading(true);
             const userDocRef = doc(db, 'users', user.uid);
             
+            // Listen to the user's specific document
             const unsubUser = onSnapshot(userDocRef, (docSnap) => {
                 if (docSnap.exists()) {
                     const userData = docSnap.data();
-                    setName(userData.name || '');
+                    setName(userData.username || userData.name || ''); // Handles 'username' from signup or 'name' from profile
                     setEmail(userData.email || '');
                     setPhone(userData.phone || '');
-                    setProfileImage(userData.profileImageUrl || 'https://placehold.co/200x200/E0E7FF/3B6EF6?text=MA');
+                    setProfileImage(userData.profileImageUrl || 'https://placehold.co/200x200/E0E7FF/3B6EF6?text=User');
                 } else {
-                     setProfileImage('https://placehold.co/200x200/E0E7FF/3B6EF6?text=MA');
+                     // If doc doesn't exist yet (legacy users), provide defaults
+                     setProfileImage('https://placehold.co/200x200/E0E7FF/3B6EF6?text=User');
                 }
+                setLoading(false);
+            }, (error) => {
+                console.error("Error fetching user doc:", error);
                 setLoading(false);
             });
 
+            // Check for notifications (Optional feature)
             const notifsRef = collection(db, 'users', user.uid, 'notifications');
             const q = query(notifsRef, limit(1));
             const unsubNotifs = onSnapshot(q, (snapshot) => {
@@ -75,6 +83,7 @@ const ProfileScreen = () => {
         }
     }, [user]);
     
+    // 3. Pick Image Function
     const handleChoosePhoto = async () => {
         const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
         if (status !== 'granted') {
@@ -83,44 +92,67 @@ const ProfileScreen = () => {
         }
 
         let result = await ImagePicker.launchImageLibraryAsync({
-            mediaTypes: ImagePicker.MediaTypeOptions.Images,
+            mediaTypes: ImagePicker.MediaType.Images,
             allowsEditing: true,
             aspect: [1, 1],
             quality: 0.5,
         });
 
+        // Modern Expo Image Picker uses assets array
         if (!result.canceled && result.assets && result.assets.length > 0) {
             const uri = result.assets[0].uri;
-            setProfileImage(uri); 
+            setProfileImage(uri); // Show immediately for better UX
             await uploadProfileImage(uri);
         }
     };
-
-    const uploadProfileImage = async (uri) => {
+const uploadProfileImage = async (uri) => {
         if (!user) return;
+        console.log(">>> STARTING UPLOAD WITH NEW CODE <<<"); // Add this line!
         setUploading(true);
 
         try {
-            const response = await fetch(uri);
-            const blob = await response.blob();
+            // 1. Convert URI to Blob using XMLHttpRequest (More stable than fetch)
+            const blob = await new Promise((resolve, reject) => {
+                const xhr = new XMLHttpRequest();
+                xhr.onload = function () {
+                    resolve(xhr.response);
+                };
+                xhr.onerror = function (e) {
+                    console.log(e);
+                    reject(new TypeError("Network request failed"));
+                };
+                xhr.responseType = "blob";
+                xhr.open("GET", uri, true);
+                xhr.send(null);
+            });
+
+            // 2. Create Reference
             const storageRef = ref(storage, `profile-pictures/${user.uid}`);
             
+            // 3. Upload
             await uploadBytes(storageRef, blob);
+            
+            // 4. Get URL
             const downloadURL = await getDownloadURL(storageRef);
 
+            // 5. Save to Firestore
             const userDocRef = doc(db, 'users', user.uid);
             await setDoc(userDocRef, { profileImageUrl: downloadURL }, { merge: true });
+            
+            // 6. Close the blob to free memory
+            blob.close();
 
             Alert.alert('Success', 'Profile picture updated!');
 
         } catch (error) {
             console.error("Error uploading image: ", error);
-            Alert.alert('Upload Error', 'Failed to upload profile picture. Please try again.');
+            Alert.alert('Upload Error', 'Failed to upload profile picture.');
         } finally {
             setUploading(false);
         }
     };
 
+    // 5. Save Text Changes
     const handleSaveChanges = async () => {
         if (!user) {
             Alert.alert('Not Logged In', 'You must be logged in to save changes.');
@@ -129,6 +161,8 @@ const ProfileScreen = () => {
 
         try {
             const userDocRef = doc(db, 'users', user.uid);
+            // We use 'username' or 'name' depending on what your app prefers. 
+            // This saves 'name' to match the TextInput state.
             await setDoc(userDocRef, { name, email, phone }, { merge: true });
             setIsEditing(false);
             Alert.alert('Success', 'Profile details have been saved!');
@@ -139,12 +173,14 @@ const ProfileScreen = () => {
     };
     
     const handleLogout = () => {
-        auth.signOut().catch(error => console.error("Logout Error:", error));
-        // Optional: Redirect to login if your auth listener doesn't handle it automatically
-        // router.replace('/Screens/LoginScreen'); 
+        auth.signOut()
+            .then(() => {
+                router.replace('/Screens/LoginScreen'); 
+            })
+            .catch(error => console.error("Logout Error:", error));
     };
 
-    if (loading && user) {
+    if (loading) {
         return (
             <SafeAreaView style={styles.container}>
                 <ActivityIndicator style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }} size="large" color="#3B6EF6" />

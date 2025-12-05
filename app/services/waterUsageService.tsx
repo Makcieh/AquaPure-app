@@ -1,11 +1,33 @@
+import { 
+  collection, 
+  query, 
+  where, 
+  getDocs, 
+  doc, 
+  setDoc, 
+  getDoc, 
+  serverTimestamp, 
+  onSnapshot, 
+  orderBy 
+} from 'firebase/firestore';
 import { db } from '../../firebaseConfig';
-import { collection, query, where, getDocs, doc, setDoc, getDoc, serverTimestamp, onSnapshot, orderBy  } from 'firebase/firestore';
+
+// 🛠️ HELPER: Get Date String (YYYY-MM-DD) in USER'S Local Timezone
+// This prevents the "Yesterday" bug when working late at night.
+const getLocalYYYYMMDD = (date) => {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
 
 // 1. Log Daily Usage
 export const logDailyUsage = async (userId, litersToAdd) => {
   if (!userId) return;
 
-  const today = new Date().toISOString().split('T')[0];
+  // ✅ FIX: Use Local Time instead of UTC (toISOString)
+  const today = getLocalYYYYMMDD(new Date());
+  
   const docRef = doc(db, 'users', userId, 'daily_water_usage', today);
 
   try {
@@ -21,42 +43,21 @@ export const logDailyUsage = async (userId, litersToAdd) => {
       liters: newTotal,
       lastUpdated: serverTimestamp()
     });
-    console.log(`✅ Logged ${litersToAdd}L. New Total: ${newTotal}`);
+    console.log(`✅ Logged ${litersToAdd}L for ${today}. New Total: ${newTotal}`);
   } catch (error) {
     console.error("❌ Error logging usage:", error);
   }
 };
 
-// 2. Get Weekly Data
+// 2. Get Weekly Data (Fetch Once - Legacy)
 export const fetchWeeklyData = async (userId) => {
+  // Keeping this for reference, but we use the listener below mostly
   if (!userId) return [];
-
-  const today = new Date();
-  const sevenDaysAgo = new Date();
-  sevenDaysAgo.setDate(today.getDate() - 7);
-  const dateString = sevenDaysAgo.toISOString().split('T')[0];
-
-  const colRef = collection(db, 'users', userId, 'daily_water_usage');
-  const q = query(colRef, where('date', '>=', dateString));
-
-  try {
-    const querySnapshot = await getDocs(q);
-    
-    const data = querySnapshot.docs.map(doc => ({
-      label: doc.data().date.slice(5), 
-      value: doc.data().liters
-    }));
-
-    return data.sort((a, b) => a.label.localeCompare(b.label)); 
-  } catch (error) {
-    console.error("❌ Error fetching weekly stats:", error);
-    return [];
-  }
+  return []; 
 };
 
-// 3. Get Total Stats (THE FIX IS HERE)
+// 3. Get Total Stats
 export const fetchAnalyticsSummary = async (userId) => {
-  // 🛑 FIX 1: Return strings if no user
   if (!userId) return { totalLiters: '0', moneySaved: '0' }; 
 
   const colRef = collection(db, 'users', userId, 'daily_water_usage');
@@ -71,34 +72,33 @@ export const fetchAnalyticsSummary = async (userId) => {
 
     const PRICE_PER_LITER_SAVED = 3.00; 
 
-    // 🛑 FIX 2: Force conversion to string using String() or toFixed()
     return {
-      totalLiters: totalLiters.toFixed(1), // .toFixed() always returns a String
-      moneySaved: (totalLiters * PRICE_PER_LITER_SAVED).toFixed(0) // String
+      totalLiters: totalLiters.toFixed(1),
+      moneySaved: (totalLiters * PRICE_PER_LITER_SAVED).toFixed(0)
     };
   } catch (error) {
     console.error("❌ Error fetching summary:", error);
-    // 🛑 FIX 3: Return strings on error
     return { totalLiters: '0', moneySaved: '0' }; 
   }
 };
-// 4. REAL-TIME LISTENER: Rolling Weekly Data (Start Today, show Days)
+
+// 4. REAL-TIME LISTENER: Rolling Weekly Data (Past 7 Days)
 export const subscribeToWeeklyData = (userId, callback) => {
   if (!userId) return () => {};
 
   const today = new Date();
   const daysOfWeek = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
   
-  // We want a rolling window: Today + Next 6 Days
   const rollingDays = [];
   
-  // 1. Generate the empty structure first (so the graph always has 7 bars)
-  for (let i = 0; i < 7; i++) {
-    const futureDate = new Date();
-    futureDate.setDate(today.getDate() + i);
+  // 1. Generate the structure (Past -> Today)
+  for (let i = 6; i >= 0; i--) {
+    const pastDate = new Date();
+    pastDate.setDate(today.getDate() - i); 
     
-    const dateStr = futureDate.toISOString().split('T')[0]; // "2025-12-02"
-    const dayName = daysOfWeek[futureDate.getDay()];        // "Tue"
+    // ✅ FIX: Use Local Time
+    const dateStr = getLocalYYYYMMDD(pastDate); 
+    const dayName = daysOfWeek[pastDate.getDay()];
     
     rollingDays.push({
       fullDate: dateStr,
@@ -107,20 +107,17 @@ export const subscribeToWeeklyData = (userId, callback) => {
     });
   }
 
-  // 2. Query Database
-  const startStr = rollingDays[0].fullDate; // Today
-  const endStr = rollingDays[6].fullDate;   // 6 days from now
+  const startStr = rollingDays[0].fullDate; // 6 days ago
+  const endStr = rollingDays[6].fullDate;   // Today
 
   const colRef = collection(db, 'users', userId, 'daily_water_usage');
   const q = query(colRef, where('date', '>=', startStr), where('date', '<=', endStr));
 
   const unsubscribe = onSnapshot(q, (snapshot) => {
-    // 3. Fill in the actual values
     snapshot.forEach(doc => {
       const dbDate = doc.data().date;
       const amount = doc.data().liters;
       
-      // Find the day in our rolling list and update it
       const targetDay = rollingDays.find(d => d.fullDate === dbDate);
       if (targetDay) {
         targetDay.value = amount;
@@ -155,81 +152,45 @@ export const subscribeToAnalyticsSummary = (userId, callback) => {
 
   return unsubscribe;
 };
-// 6. REAL-TIME: Monthly Data (Show all days in current month)
-export const subscribeToMonthlyData = (userId, callback) => {
-  if (!userId) return () => {};
 
-  const date = new Date();
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, '0'); // e.g., "12"
-  
-  // Range: "2025-12-01" to "2025-12-31"
-  const startDate = `${year}-${month}-01`;
-  const endDate = `${year}-${month}-31`;
-
-  const colRef = collection(db, 'users', userId, 'daily_water_usage');
-  const q = query(colRef, where('date', '>=', startDate), where('date', '<=', endDate));
-
-  const unsubscribe = onSnapshot(q, (snapshot) => {
-    const data = snapshot.docs.map(doc => ({
-      label: doc.data().date.slice(8), // Get day only ("02" from "2025-12-02")
-      value: doc.data().liters
-    }));
-    // Sort by day (1, 2, 3...)
-    callback(data.sort((a, b) => a.label.localeCompare(b.label)));
-  });
-
-  return unsubscribe;
-};
-
-// 7. REAL-TIME: Rolling 12-Months (Starts from Current Month)
+// 6. REAL-TIME: Yearly Data (Rolling 12-Months)
 export const subscribeToYearlyData = (userId, callback) => {
   if (!userId) return () => {};
 
   const today = new Date();
   const currentYear = today.getFullYear();
-  const currentMonth = today.getMonth(); // 0 = Jan, 11 = Dec
+  const currentMonth = today.getMonth(); // 0 = Jan
 
-  // 1. Calculate Start Date (1st of this month)
-  // e.g., "2025-12-01"
-  const startY = currentYear;
+  // Start from 1st of current month
   const startM = String(currentMonth + 1).padStart(2, '0');
-  const startDate = `${startY}-${startM}-01`;
+  const startDate = `${currentYear}-${startM}-01`;
 
-  // 2. Calculate End Date (1 year from now)
-  // We just query everything after start date. 
-  // We will filter/limit to 12 bars in the logic below.
   const colRef = collection(db, 'users', userId, 'daily_water_usage');
   const q = query(colRef, where('date', '>=', startDate), orderBy('date', 'asc'));
 
   const unsubscribe = onSnapshot(q, (snapshot) => {
-    const usageMap = {}; // Helper to store sums: { "2025-12": 50, "2026-01": 20 }
+    const usageMap = {}; 
 
     snapshot.forEach(doc => {
       const data = doc.data();
-      // data.date is "2025-12-02" -> Key "2025-12"
-      const key = data.date.substring(0, 7); 
-      
+      const key = data.date.substring(0, 7); // "2025-12"
       if (!usageMap[key]) usageMap[key] = 0;
       usageMap[key] += data.liters;
     });
 
-    // 3. Generate the 12 Bars (Rolling Forward)
     const rollingData = [];
     const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
     for (let i = 0; i < 12; i++) {
-      // Calculate future date
       const d = new Date(currentYear, currentMonth + i, 1);
       const y = d.getFullYear();
       const m = d.getMonth();
       const mString = String(m + 1).padStart(2, '0');
-      
-      const key = `${y}-${mString}`; // "2025-12", "2026-01"
+      const key = `${y}-${mString}`; 
       
       rollingData.push({
-        label: monthNames[m], // "Dec", "Jan", "Feb"
-        value: usageMap[key] || 0 // Usage or 0 if empty
+        label: monthNames[m],
+        value: usageMap[key] || 0
       });
     }
 
@@ -238,7 +199,8 @@ export const subscribeToYearlyData = (userId, callback) => {
 
   return unsubscribe;
 };
-// 8. REAL-TIME: Multi-Year Data (Safe Version)
+
+// 8. REAL-TIME: Multi-Year Data
 export const subscribeToMultiYearData = (userId, callback) => {
   if (!userId) return () => {};
 
@@ -250,19 +212,12 @@ export const subscribeToMultiYearData = (userId, callback) => {
 
     snapshot.forEach(doc => {
       const data = doc.data();
-      
-      // 🛡️ SAFETY CHECK: If date or liters is missing, skip this document
-      if (!data.date || typeof data.date !== 'string') {
-        console.warn(`⚠️ Skipping bad document: ${doc.id}`);
-        return; 
-      }
+      if (!data.date) return;
 
-      const year = data.date.split('-')[0]; // Safe to split now
-      const liters = Number(data.liters) || 0; // Ensure it's a number
+      const year = data.date.split('-')[0];
+      const liters = Number(data.liters) || 0;
 
-      if (!yearlyTotals[year]) {
-        yearlyTotals[year] = 0;
-      }
+      if (!yearlyTotals[year]) yearlyTotals[year] = 0;
       yearlyTotals[year] += liters;
     });
 
@@ -272,6 +227,25 @@ export const subscribeToMultiYearData = (userId, callback) => {
     }));
 
     callback(data);
+  });
+
+  return unsubscribe;
+};
+// 9. REAL-TIME: Listen ONLY to Today's Document (For the Daily Card)
+export const subscribeToTodayUsage = (userId, callback) => {
+  if (!userId) return () => {};
+
+  const today = getLocalYYYYMMDD(new Date()); // Get "2025-12-04" (or current date)
+  const docRef = doc(db, 'users', userId, 'daily_water_usage', today);
+
+  const unsubscribe = onSnapshot(docRef, (docSnap) => {
+    if (docSnap.exists()) {
+      // If data exists for today, send the liters
+      callback(docSnap.data().liters || 0);
+    } else {
+      // If no document exists yet for today, usage is 0
+      callback(0);
+    }
   });
 
   return unsubscribe;

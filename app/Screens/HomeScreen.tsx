@@ -6,7 +6,8 @@ import {
   subscribeToWeeklyData, 
   subscribeToAnalyticsSummary, 
   subscribeToYearlyData, 
-  subscribeToMultiYearData 
+  subscribeToMultiYearData,
+  subscribeToTodayUsage 
 } from '../services/waterUsageService';
 import React, { useState, useEffect } from "react";
 import {
@@ -20,13 +21,15 @@ import {
   View,
   Platform,
   StatusBar,
+  AppState
 } from "react-native";
 import { Feather, Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import Svg, { Path } from "react-native-svg";
 
 // --- Firebase Imports ---
-import { auth, realtimeDb } from "../../firebaseConfig";
+import { auth, realtimeDb, db } from "../../firebaseConfig";
+import { doc, onSnapshot } from "firebase/firestore";
 import { ref, onValue } from "firebase/database";
 
 // --- TypeScript Interfaces ---
@@ -51,7 +54,7 @@ interface BarGraphProps {
   onMonthPress?: () => void;
   onYearPress?: () => void;
   isMonth?: boolean;
-  maxValue?: number; // ✅ FIXED: Added this property
+  maxValue?: number; 
 }
 
 interface AnalyticsGraphProps {
@@ -59,7 +62,7 @@ interface AnalyticsGraphProps {
   timeRange: string;
   color: string;
   yAxisLabels: string[];
-  maxValue?: number; // ✅ FIXED: Added this property
+  maxValue?: number; 
 }
 
 interface FilterCyclesCardProps {
@@ -99,7 +102,6 @@ const BarGraph = ({
     );
   }
 
-  // Calculate Scale
   const dataMax = Math.max(...data.map((item) => item.value));
   const scaleMax = maxValue || (dataMax > 0 ? dataMax : 1);
 
@@ -262,6 +264,40 @@ const FilterCyclesCard = ({ currentCycles, maxCycles, color }: FilterCyclesCardP
   );
 };
 
+// --- Maintenance Forecaster ---
+const MaintenanceCard = ({ totalLiters, width }: { totalLiters: string, width: any }) => {
+  const MAX_LIFE = 2000;
+  const AVG_DAILY_USE = 5; 
+
+  const used = parseFloat(totalLiters || '0');
+  const remainingLiters = Math.max(0, MAX_LIFE - used);
+  const daysLeft = Math.ceil(remainingLiters / AVG_DAILY_USE);
+
+  const targetDate = new Date();
+  targetDate.setDate(targetDate.getDate() + daysLeft);
+  
+  const dateString = targetDate.toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  });
+
+  return (
+    <View style={[styles.maintenanceCard, { width: width }]}>
+      <View style={{flex: 1}}>
+        <Text style={styles.maintTitle}>Next Change</Text>
+        <Text style={styles.maintDate}>{dateString}</Text>
+        <Text style={styles.maintSubtitle}>
+          {daysLeft} days left
+        </Text>
+      </View>
+      <View style={styles.maintIconBox}>
+        <Ionicons name="construct-outline" size={24} color="#fff" />
+      </View>
+    </View>
+  );
+};
+
 const AnalyticsTabContent = () => {
   const [timeRange, setTimeRange] = useState("Month");
   const [chartData, setChartData] = useState([]);
@@ -322,9 +358,14 @@ const HomeScreen = () => {
   const router = useRouter();
   const [showDropdown, setShowDropdown] = useState(false);
   const [activeTab, setActiveTab] = useState("Dashboard");
+  
+  const [userProfile, setUserProfile] = useState({
+    name: "Loading...",
+    image: "https://placehold.co/200x200/E0E7FF/3B6EF6?text=MA" 
+  });
 
-  // ✅ FIXED: State definition exists and is typed correctly
   const [weeklyData, setWeeklyData] = useState<GraphDataPoint[]>([]);
+  const [todayLiters, setTodayLiters] = useState(0); 
 
   interface AnalyticsData {
     totalLiters: string;
@@ -336,7 +377,6 @@ const HomeScreen = () => {
     moneySaved: '0'
   });
 
-  // Real-time sensor state
   const [sensorData, setSensorData] = useState({
     ph: 0,
     turbidity: 0,
@@ -344,6 +384,8 @@ const HomeScreen = () => {
     waterLevel: 0,
     flowRate: 0,
     dailyUsage: 0,
+    // 👇 ADD THIS: Tracks if Arduino is actively filtering
+    isFiltering: false, 
   });
 
   const handleLogout = async () => {
@@ -359,22 +401,63 @@ const HomeScreen = () => {
     const userId = auth.currentUser?.uid;
     if (!userId) return;
 
-    console.log("🟢 Starting Real-Time Analytics Stream...");
-
-    // A. Subscribe to Weekly Graph Updates
-    const unsubWeekly = subscribeToWeeklyData(userId, (newData) => {
-      setWeeklyData(newData);
+    const userDocRef = doc(db, "users", userId);
+    
+    const unsubscribe = onSnapshot(userDocRef, (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        setUserProfile({
+          name: data.name || "User", 
+          image: data.profileImageUrl || "https://placehold.co/200x200/E0E7FF/3B6EF6?text=MA"
+        });
+      }
     });
 
-    // B. Subscribe to Total Stats Updates
-    const unsubSummary = subscribeToAnalyticsSummary(userId, (newStats) => {
-      setAnalytics(newStats);
+    return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    const userId = auth.currentUser?.uid;
+    if (!userId) return;
+
+    let unsubWeekly = () => {};
+    let unsubSummary = () => {};
+    let unsubToday = () => {};
+
+    const startListeners = () => {
+      unsubWeekly();
+      unsubSummary();
+      unsubToday();
+
+      console.log("🔄 (Re)Starting Analytics Streams...");
+
+      unsubWeekly = subscribeToWeeklyData(userId, (newData) => {
+        setWeeklyData(newData);
+      });
+
+      unsubSummary = subscribeToAnalyticsSummary(userId, (newStats) => {
+        setAnalytics(newStats);
+      });
+
+      unsubToday = subscribeToTodayUsage(userId, (liters) => {
+        setTodayLiters(liters);
+      });
+    };
+
+    startListeners();
+
+    const appStateListener = AppState.addEventListener('change', (nextAppState) => {
+      if (nextAppState === 'active') {
+        startListeners();
+      }
     });
 
     return () => {
       console.log("🔴 Closing Analytics Stream...");
       unsubWeekly();
       unsubSummary();
+      unsubToday();
+      appStateListener.remove();
     };
   }, []);
 
@@ -395,6 +478,8 @@ const HomeScreen = () => {
           waterLevel: Number(data.waterLevel) || 0,
           flowRate: Number(data.flowRate) || 0,
           dailyUsage: Number(data.dailyUsage) || 0,
+          // 👇 ADD THIS: Read the filtering status from Arduino
+          isFiltering: Boolean(data.isFiltering), 
         });
       }
     });
@@ -417,31 +502,25 @@ const HomeScreen = () => {
     valueBg: isSafe ? "#7ACE7D" : "#FFCDD2",
   };
 
-  const userProfileImage = "https://placehold.co/200x200/E0E7FF/3B6EF6?text=MA";
   const screenWidth = Dimensions.get("window").width;
   const cardWidth = screenWidth - 32;
-  const safeWaterLevel = Math.min(Math.max(sensorData.waterLevel, 0), 100);
-  const waveHeight = 230 - (safeWaterLevel / 100) * 230;
-
+  
   const MAX_FILTER_LIFE = 2000;
   const totalUsed = parseFloat(analytics.totalLiters || '0');
   const healthPercentage = Math.max(0, 100 - ((totalUsed / MAX_FILTER_LIFE) * 100)).toFixed(0);
-
-  // Get Today's Liters from the Graph Data
-  const daysOfWeek = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-  const todayLabel = daysOfWeek[new Date().getDay()]; // e.g. "Tue"
-  const todayData = weeklyData.find(item => item.label === todayLabel);
-  const todayLiters = todayData ? todayData.value : 0;
 
   return (
     <SafeAreaView style={styles.page}>
       <StatusBar barStyle="dark-content" backgroundColor="transparent" translucent={true} />
       <View style={styles.headerContainer}>
         <TouchableOpacity style={styles.profileSection} onPress={() => router.push("./ProfileScreen")}>
-          <Image source={{ uri: userProfileImage }} style={styles.profileImage} />
+          <Image
+            source={{ uri: userProfile.image }} 
+            style={styles.profileImage}
+          />
           <View style={{ marginLeft: 10 }}>
             <Text style={styles.greeting}>Good Afternoon</Text>
-            <Text style={styles.username}>Michael Angelo</Text>
+            <Text style={styles.username}>{userProfile.name}</Text>
           </View>
         </TouchableOpacity>
         <View style={styles.rightIcons}>
@@ -473,20 +552,47 @@ const HomeScreen = () => {
 
       {activeTab === "Dashboard" && (
         <ScrollView contentContainerStyle={styles.dashboardContainer}>
-          <View style={[styles.card, { borderColor: currentStatus.bgColor, borderWidth: 1 }]}>
+         <View style={[styles.card, { borderColor: currentStatus.bgColor, borderWidth: 1 }]}>
             <View style={styles.waveContainer}>
               <Svg height="230" width={cardWidth}>
-                <Path d={`M0 ${waveHeight} Q${cardWidth / 4} ${waveHeight - 30}, ${cardWidth / 2} ${waveHeight} T${cardWidth} ${waveHeight} V230 H0 Z`} fill={currentStatus.bgColor} />
+                <Path
+                  fill={currentStatus.bgColor}
+                  fillOpacity="1"
+                  d={`
+                    M 0 115
+                    Q ${cardWidth / 4} ${115 - 10} ${cardWidth / 2} 115
+                    T ${cardWidth} 115
+                    V 230
+                    H 0
+                    Z
+                  `}
+                />
               </Svg>
             </View>
+
             <View style={styles.topRow}>
               <View>
                 <Text style={styles.title}>{currentStatus.title}</Text>
-                <Text style={styles.subtitle}>Current Tank Level: {safeWaterLevel}%</Text>
+                {/* 🚨 UPDATED AUTOMATION STATUS INDICATOR */}
+                <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 5 }}>
+                  <View style={{ 
+                    width: 8, height: 8, borderRadius: 4, 
+                    // Red = Filtering, Green = Monitoring
+                    backgroundColor: sensorData.isFiltering ? '#FF5252' : '#4ADE80', 
+                    marginRight: 6 
+                  }} />
+                  <Text style={{ fontSize: 13, color: '#555', fontWeight: '500' }}>
+                    {sensorData.isFiltering ? "⚠️ Active Filtration" : "System Monitoring (Auto)"}
+                  </Text>
+                </View>
               </View>
               <Text style={styles.temp}>{currentStatus.temp} <Feather name="thermometer" size={18} color="#333" /></Text>
             </View>
-            <View style={[styles.circle, { backgroundColor: currentStatus.circleColor }]}>{currentStatus.icon}</View>
+
+            <View style={[styles.circle, { backgroundColor: currentStatus.circleColor }]}>
+              {currentStatus.icon}
+            </View>
+
             <View style={styles.bottomRow}>
               <View style={styles.valueBoxWrapper}>
                 <View style={[styles.valueBox, { backgroundColor: currentStatus.valueBg }]}>
@@ -522,12 +628,14 @@ const HomeScreen = () => {
                 <Text style={styles.detailValue}>{healthPercentage}%</Text>
                 <Text style={styles.detailLabel}>Filter Health</Text>
               </View>
+              
+              <MaintenanceCard totalLiters={analytics.totalLiters} width="63%" />
+              
             </View>
           </View>
 
           <BarGraph
             title="Weekly Water Usage"
-            // ✅ FIXED: Using real weeklyData instead of fake static array
             data={weeklyData.length > 0 ? weeklyData : [{ label: 'No Data', value: 0 }]}
             color={currentStatus.bgColor}
             yAxisLabels={["50L", "25L", "10L", ""]}
@@ -550,7 +658,15 @@ const HomeScreen = () => {
       {activeTab === "Analytics" && <AnalyticsTabContent />}
 
       <TouchableOpacity
-        style={{ backgroundColor: 'orange', padding: 15, margin: 20, borderRadius: 10, alignItems: 'center' }}
+        style={{
+          backgroundColor: 'orange',
+          padding: 15,
+          marginHorizontal: 20, 
+          marginBottom: 20, 
+          marginTop: 10,
+          borderRadius: 10,
+          alignItems: 'center'
+        }}
         onPress={async () => {
           const uid = auth.currentUser?.uid;
           if (uid) {
@@ -586,7 +702,7 @@ const styles = StyleSheet.create({
   divider: { width: 1, height: 20, backgroundColor: "#ccc", marginHorizontal: 10 },
   dashboardContainer: { paddingHorizontal: 16, paddingBottom: 16 },
   card: { height: 230, borderRadius: 20, padding: 16, overflow: "hidden", backgroundColor: "#fff", elevation: 3, shadowColor: "#000", shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.1, shadowRadius: 4, marginBottom: 16, position: "relative" },
-  waveContainer: { position: "absolute", bottom: 0, left: 0, right: 0, zIndex: 0 },
+  waveContainer: { position: "absolute", bottom: 0, left: 0, right: 0, zIndex: -1, overflow: 'hidden', borderBottomLeftRadius: 20, borderBottomRightRadius: 20 },
   topRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start" },
   title: { fontSize: 25, fontWeight: "bold", color: "#000" },
   subtitle: { fontSize: 13, color: "#555", marginTop: 2 },
@@ -631,4 +747,44 @@ const styles = StyleSheet.create({
   filterCountContainer: { flexDirection: "row", alignItems: "baseline", backgroundColor: "rgba(255, 255, 255, 0.2)", borderRadius: 12, paddingHorizontal: 12, paddingVertical: 6 },
   filterCount: { fontSize: 20, fontWeight: "bold", color: "#fff" },
   filterMax: { fontSize: 14, color: "#E0E0E0", marginLeft: 2 },
+  
+  // 🛠️ NEW STYLES for Maintenance Card
+  maintenanceCard: {
+    backgroundColor: '#6366F1', // Indigo/Purple
+    borderRadius: 16, // Matched to detailCard
+    padding: 16,      // Matched to detailCard
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    elevation: 2,     // Matched to detailCard
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.2,
+    shadowRadius: 1.41,
+    minHeight: 100, // Matched to detailCard
+  },
+  maintTitle: {
+    fontSize: 12,
+    color: '#E0E7FF',
+    fontWeight: '600',
+    marginBottom: 4,
+  },
+  maintDate: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: '#fff',
+    marginBottom: 2,
+  },
+  maintSubtitle: {
+    fontSize: 10,
+    color: '#C7D2FE',
+  },
+  maintIconBox: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255,255,255,0.2)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
 });
